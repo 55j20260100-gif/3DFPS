@@ -172,6 +172,14 @@
   #player-health.show { opacity:1; }
   #player-health > div { height:100%; width:100%; background:linear-gradient(90deg,#ff3d3d,#ffe15a,#7fffa0); }
   #start-screen.hide { display:none; }
+  #match-countdown, #match-result { position:fixed; inset:0; z-index:180; display:none; align-items:center; justify-content:center; flex-direction:column; text-align:center; pointer-events:none; background:rgba(0,0,0,.28); text-shadow:0 0 18px #000; }
+  #match-countdown.show, #match-result.show { display:flex; }
+  #match-countdown .count { color:#ffe15a; font-size:clamp(64px,16vw,150px); font-weight:bold; }
+  #match-countdown .label { color:#dfe; font-size:15px; letter-spacing:3px; }
+  #match-result .result-title { font-size:clamp(40px,10vw,92px); font-weight:bold; letter-spacing:5px; }
+  #match-result .result-title.win { color:#7fffa0; } #match-result .result-title.lose { color:#ff6262; }
+  #match-result .result-detail { margin-top:14px; color:#dfe; font-size:16px; }
+  #match-score { color:#ffe15a; font-size:12px; margin-top:3px; letter-spacing:1px; }
 
   #vignette { position:fixed; inset:0; pointer-events:none; z-index:5;
     box-shadow: inset 0 0 180px 40px rgba(0,0,0,0.55); }
@@ -247,6 +255,7 @@
 
   <div id="bottom-right">
     <div id="score-display">SCORE 0</div>
+    <div id="match-score"></div>
     <div id="accuracy-display">命中率 0% (0/0)</div>
   </div>
 
@@ -320,6 +329,8 @@
   </div>
 </div>
 
+<div id="match-countdown"><div class="label">MATCH STARTING</div><div class="count">3</div></div>
+<div id="match-result"><div class="result-title"></div><div class="result-detail"></div></div>
 <div id="start-screen">
   <div>
     <h1>SHOOTING RANGE</h1>
@@ -1284,7 +1295,7 @@ const state = window.state = {
   locked: false,
   gameActive: false,
   kick: {pos:0, rot:0}, weaponRecoilPitch: 0,
-  shakeTime: 0, botMode:false, onlineMatch:false, teamMode:'duel', playerHP:100, lives:3, kills:0, spectatingId:null, grenades:2, bombs:1
+  shakeTime: 0, botMode:false, onlineMatch:false, teamMode:'duel', playerHP:100, lives:3, kills:0, spectatingId:null, grenades:2, bombs:1, countdownTimer:null, matchEnded:false
 };
 
 let currentFOV = settings.fov;
@@ -1464,8 +1475,13 @@ function netRemoteState(m){
 function remoteShot(m){flashLight.intensity=2; flashSprite.material.opacity=.7;}
 function remoteEvent(m){
   if(m.name==='eliminated'){
-    state.kills++; state.score+=100; document.getElementById('score-display').textContent=`KILLS ${state.kills}`;
-    if(state.teamMode==='duel' && state.kills>=15){ state.gameActive=false; teamObjective.textContent='VICTORY — 15 KILLS'; startScreen.classList.remove('hide'); }
+    if(m.killerId===net.clientId){
+      state.kills++; state.score+=100;
+      if(state.teamMode==='duel' && state.kills>=15) showMatchResult(true,'15 KILLS 達成');
+    } else if(state.teamMode==='duel' && m.killerId){
+      showMatchResult(false,'相手チームが15 KILLSを達成');
+    }
+    document.getElementById('score-display').textContent=`SCORE ${state.score}`; updateMatchScore();
   }
   if(m.name==='grenade'){} if(m.name==='bomb'){} if(m.name==='drone'){}
 }
@@ -1521,18 +1537,40 @@ document.getElementById('start-instructions').textContent = useTouchUI
 
 // 実際にOSレベルのポインターロックが取得できない環境(iframe等)でも
 // 操作不能にならないよう、"ゲームがアクティブか"と"ポインターロックが取れたか"を分離する
+function updateMatchScore(){
+  const el=document.getElementById('match-score');
+  if(!state.onlineMatch){ el.textContent=''; return; }
+  el.textContent=`${net.team.toUpperCase()}  KILLS ${state.kills} / 15   HP ${Math.ceil(state.playerHP)}%`;
+}
+function showMatchResult(win, detail){
+  state.gameActive=false; state.matchEnded=true;
+  const panel=document.getElementById('match-result');
+  const title=panel.querySelector('.result-title');
+  title.textContent=win?'VICTORY':'DEFEAT'; title.className='result-title '+(win?'win':'lose');
+  panel.querySelector('.result-detail').textContent=detail||`KILLS ${state.kills} — 3秒後にメニューへ`;
+  panel.classList.add('show');
+  setTimeout(()=>{ panel.classList.remove('show'); startScreen.classList.remove('hide'); },3000);
+}
+function startCountdown(){
+  const panel=document.getElementById('match-countdown'), count=panel.querySelector('.count');
+  if(state.countdownTimer) clearInterval(state.countdownTimer);
+  let n=3; count.textContent=n; panel.classList.add('show'); state.gameActive=false;
+  state.countdownTimer=setInterval(()=>{ n--; count.textContent=n>0?n:'GO'; if(n<=0){ clearInterval(state.countdownTimer); state.countdownTimer=null; setTimeout(()=>{panel.classList.remove('show'); state.gameActive=true;},420); } },700);
+}
 function startGame(botMode){
   state.teamMode = teamMode.value;
   applyMap(mapSelect.value);
-  state.onlineMatch=net.connected; state.botMode=botMode; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
+  state.onlineMatch=net.connected; state.botMode=botMode; state.matchEnded=false; state.kills=0; state.score=0; state.hits=0; state.shots=0; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
   document.querySelector('#player-health > div').style.width='100%';
   document.getElementById('player-health').classList.toggle('show',botMode || state.onlineMatch);
   document.getElementById('bot-hud').classList.toggle('show',botMode || state.onlineMatch); chatPanel.classList.toggle('show',state.onlineMatch);
   teamObjective.textContent = state.onlineMatch ? (state.teamMode==='elimination' ? 'P2P ELIMINATION: 残機3、最後まで生き残れ' : 'P2P DUEL: 先に15キルで勝利') : (botMode ? (state.teamMode==='attack' ? 'ATTACK: BOT拠点を制圧 — 敵をすべて排除' : 'DEFEND: 拠点を守れ — BOTの攻撃を耐え抜け') : 'FREE RANGE: 武器とマップを選んで練習');
   document.getElementById('bot-hud').textContent = state.onlineMatch ? 'P2P COMBAT' : (botMode ? (state.teamMode==='attack' ? 'ATTACK TEAM' : 'DEFENSE TEAM') : 'BOT ARENA');
   startScreen.classList.add('hide');
-  state.gameActive = true;
+  state.gameActive = false;
+  document.getElementById('score-display').textContent='SCORE 0'; updateAccuracy(); updateMatchScore();
   if(state.startTime===0) state.startTime = performance.now();
+  if(state.onlineMatch) startCountdown(); else state.gameActive=true;
   ensureAudio();
   if(useTouchUI){
     document.getElementById('mobile-controls').classList.add('active');
@@ -1842,7 +1880,7 @@ function damagePlayer(amount,killerId=null){
       if(state.teamMode==='elimination' && state.lives<=0) state.lives=3;
       netSetStatus(`撃破 — ${state.teamMode==='elimination'?'残機をリセット':'3秒後にリスポーン'}（キラー視点で観戦中）`);
       setTimeout(respawnOnline,3000);
-    } else { state.gameActive=false; startScreen.classList.remove('hide'); document.getElementById('start-instructions').textContent='撃破されました。BOT ARENAで再挑戦してください。'; }
+    } else { showMatchResult(false,'撃破されました。'); }
   }
 }
 function setOnlineSpawn(){
@@ -2480,6 +2518,7 @@ function animate(){
     const s2 = String(sec%60).padStart(2,'0');
     document.getElementById('timer-display').textContent = `${m2}:${s2}`;
   }
+  updateMatchScore();
 
   updateBullets(dt);
   updateCasings(dt);
