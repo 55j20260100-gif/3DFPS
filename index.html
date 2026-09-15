@@ -1347,7 +1347,7 @@ const chatPanel=document.getElementById('chat-panel'); const chatLog=document.ge
 const matchStart=document.getElementById('match-start'); const matchRoster=document.getElementById('match-roster');
 const PEER_PREFIX='3dfps-room-';
 let peer=null;
-net.clientId=Math.random().toString(36).slice(2,10); net.maxPlayers=4; net.team='red'; net.connections=new Map(); net.roster=[];
+net.clientId=Math.random().toString(36).slice(2,10); net.maxPlayers=4; net.team='red'; net.connections=new Map(); net.roster=[]; net.matchStarted=false; net.teamSeen={red:false,blue:false};
 function netSetStatus(t){netStatus.textContent=t;}
 function makeRoomCode(){return Math.random().toString(36).slice(2,8).toUpperCase();}
 function cleanRoomCode(value){return value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);}
@@ -1361,6 +1361,26 @@ function updateRoster(players){
   net.roster=players||[];
   matchRoster.innerHTML=net.roster.map((player,index)=>`<div style="color:${player.team==='red'?'#ff9b9b':'#9bc7ff'}">${player.team==='red'?'RED':'BLUE'} — ${player.name||`PLAYER ${index+1}`}</div>`).join('') || '<span style="opacity:.7">参加者を待っています…</span>';
 }
+function connectedTeamCounts(){
+  const counts={red:net.role==='host' ? 1 : 0, blue:0};
+  net.connections.forEach(connection=>{ const team=connection.assignedTeam; if(team==='red'||team==='blue') counts[team]++; });
+  return counts;
+}
+function checkTeamDeparture(){
+  if(net.role!=='host' || !net.matchStarted || state.matchEnded) return;
+  const counts=connectedTeamCounts();
+  if(counts.red===0 || counts.blue===0){
+    const losingTeam=counts.red===0?'red':'blue';
+    const winningTeam=losingTeam==='red'?'blue':'red';
+    netSend({type:'event',name:'team-left',losingTeam,winningTeam});
+    if(net.team===winningTeam) showMatchResult(true,`${losingTeam.toUpperCase()} TEAM 全員退出 — 勝利`);
+  }
+}
+function markTeamSeen(){
+  if(net.team==='red'||net.team==='blue') net.teamSeen[net.team]=true;
+  net.connections.forEach(connection=>{ if(connection.assignedTeam==='red'||connection.assignedTeam==='blue') net.teamSeen[connection.assignedTeam]=true; });
+}
+
 function sendLobbyState(){
   if(net.role!=='host') return;
   const players=[{name:'HOST',team:'red'},...Array.from(net.connections.values()).map((connection,index)=>({name:`PLAYER ${index+2}`,team:connection.assignedTeam||'blue'}))];
@@ -1370,21 +1390,21 @@ function sendLobbyState(){
 }
 function startOnlineMatch(){
   if(net.role!=='host' || net.connections.size===0) return;
-  netSend({type:'match-start'}); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false);
+  net.matchStarted=true; markTeamSeen(); netSend({type:'match-start'}); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false);
 }
 
 function closePeer(){
   net.connections.forEach(connection=>connection.close()); net.connections.clear();
   if(net.dc){net.dc.close(); net.dc=null;}
   if(peer){peer.destroy(); peer=null;}
-  net.connected=false; net.role=null;
+  net.connected=false; net.role=null; net.matchStarted=false; net.teamSeen={red:false,blue:false};
 }
 function receiveNetMessage(message){
   if(!message || typeof message!=='object') return;
   if(message.type==='state') netRemoteState(message);
   else if(message.type==='match-config'){ net.team=message.assignedTeam||net.team; mapSelect.value=message.map; teamMode.value=message.mode; applyMap(message.map); netSetStatus(`ロビー参加 — ${net.team.toUpperCase()} TEAM`); }
   else if(message.type==='lobby') updateRoster(message.players);
-  else if(message.type==='match-start'){ netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false); }
+  else if(message.type==='match-start'){ net.matchStarted=true; markTeamSeen(); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false); }
   else if(message.type==='hit' && message.target===net.clientId && message.team!==net.team) damagePlayer(message.damage||25,message.from);
   else if(message.type==='chat') addChatMessage(message.text,message.team);
   else if(message.type==='shot') remoteShot(message);
@@ -1403,7 +1423,9 @@ function attachConnection(connection){
     else netSetStatus('ロビー参加中 — ホストの開始を待っています');
   });
   connection.on('close',()=>{
-    net.connections.delete(connection.peer); net.players=net.connections.size; if(net.role==='host') sendLobbyState(); if(net.role!=='host' || net.connections.size===0){net.connected=false; netSetStatus('相手が退出しました');}
+    net.connections.delete(connection.peer); net.players=net.connections.size;
+    if(net.role==='host'){ sendLobbyState(); checkTeamDeparture(); }
+    if(net.role!=='host' || net.connections.size===0){net.connected=false; netSetStatus('相手が退出しました');}
   });
   connection.on('error',()=>netSetStatus('P2P 接続エラー。もう一度お試しください。'));
 }
@@ -1435,6 +1457,7 @@ function quickMatch(){
   if(cleanRoomCode(matchRoom.value)) joinMatch(); else createMatch();
 }
 function leaveMatch(){
+  if(net.connected && net.matchStarted) netSend({type:'event',name:'team-left',losingTeam:net.team,winningTeam:net.team==='red'?'blue':'red'});
   closePeer(); netSetStatus('退出しました'); matchRoomLabel.textContent='';
   remotePlayers.forEach(player=>scene.remove(player)); remotePlayers.clear();
 }
@@ -1474,6 +1497,11 @@ function netRemoteState(m){
 }
 function remoteShot(m){flashLight.intensity=2; flashSprite.material.opacity=.7;}
 function remoteEvent(m){
+  if(m.name==='team-left' && !state.matchEnded){
+    const won=m.winningTeam===net.team;
+    showMatchResult(won,`${m.losingTeam.toUpperCase()} TEAM 全員退出 — ${won?'勝利':'敗北'}`);
+    return;
+  }
   if(m.name==='eliminated'){
     if(m.killerId===net.clientId){
       state.kills++; state.score+=100;
