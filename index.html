@@ -1242,13 +1242,14 @@ function addMovingImpactMark(hit){
   mark.position.copy(localPoint).addScaledVector(localNormal,.008);
   mark.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),localNormal);
   mark.userData.bulletMark=true; mark.userData.markLife=0;
+  mark.userData.anchorPosition=mark.position.clone(); mark.userData.anchorQuaternion=mark.quaternion.clone();
   object.add(mark);
   if(object.userData.bulletMarks){ object.userData.bulletMarks.push(mark); if(object.userData.bulletMarks.length>18){ object.remove(object.userData.bulletMarks.shift()); } } else object.userData.bulletMarks=[mark];
 }
 function updateMovingImpactMarks(dt){
   scene.traverse(object=>{
     const marks=object.userData?.bulletMarks; if(!marks) return;
-    for(let i=marks.length-1;i>=0;i--){ const mark=marks[i]; mark.userData.markLife=(mark.userData.markLife||0)+dt; if(mark.userData.markLife>18){ object.remove(mark); marks.splice(i,1); } }
+    for(let i=marks.length-1;i>=0;i--){ const mark=marks[i]; mark.position.copy(mark.userData.anchorPosition); mark.quaternion.copy(mark.userData.anchorQuaternion); mark.userData.markLife=(mark.userData.markLife||0)+dt; if(mark.userData.markLife>18){ object.remove(mark); marks.splice(i,1); } }
   });
 }
 
