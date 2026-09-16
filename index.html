@@ -1347,7 +1347,7 @@ const chatPanel=document.getElementById('chat-panel'); const chatLog=document.ge
 const matchStart=document.getElementById('match-start'); const matchRoster=document.getElementById('match-roster');
 const PEER_PREFIX='3dfps-room-';
 let peer=null;
-net.clientId=Math.random().toString(36).slice(2,10); net.maxPlayers=4; net.team='red'; net.connections=new Map(); net.roster=[]; net.matchStarted=false; net.teamSeen={red:false,blue:false};
+net.clientId=Math.random().toString(36).slice(2,10); net.maxPlayers=4; net.team='red'; net.connections=new Map(); net.roster=[]; net.matchStarted=false; net.teamSeen={red:false,blue:false}; net.teamMembers={red:[],blue:[]}; net.alive=new Set(); net.eliminated=new Set(); net.roundWins={red:0,blue:0}; net.roundResolved=false;
 function netSetStatus(t){netStatus.textContent=t;}
 function makeRoomCode(){return Math.random().toString(36).slice(2,8).toUpperCase();}
 function cleanRoomCode(value){return value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);}
@@ -1361,20 +1361,51 @@ function updateRoster(players){
   net.roster=players||[];
   matchRoster.innerHTML=net.roster.map((player,index)=>`<div style="color:${player.team==='red'?'#ff9b9b':'#9bc7ff'}">${player.team==='red'?'RED':'BLUE'} — ${player.name||`PLAYER ${index+1}`}</div>`).join('') || '<span style="opacity:.7">参加者を待っています…</span>';
 }
-function connectedTeamCounts(){
-  const counts={red:net.role==='host' ? 1 : 0, blue:0};
-  net.connections.forEach(connection=>{ const team=connection.assignedTeam; if(team==='red'||team==='blue') counts[team]++; });
-  return counts;
+function buildTeamMembers(){
+  const members={red:[net.clientId],blue:[]};
+  net.connections.forEach(connection=>{
+    const team=connection.assignedTeam;
+    if(team==='red'||team==='blue') members[team].push(connection.peer);
+  });
+  net.teamMembers=members;
+  net.alive=new Set([...members.red,...members.blue]);
+  net.eliminated=new Set(); net.roundResolved=false;
 }
-function checkTeamDeparture(){
-  if(net.role!=='host' || !net.matchStarted || state.matchEnded) return;
-  const counts=connectedTeamCounts();
-  if(counts.red===0 || counts.blue===0){
-    const losingTeam=counts.red===0?'red':'blue';
-    const winningTeam=losingTeam==='red'?'blue':'red';
-    netSend({type:'event',name:'team-left',losingTeam,winningTeam});
-    if(net.team===winningTeam) showMatchResult(true,`${losingTeam.toUpperCase()} TEAM 全員退出 — 勝利`);
+function resetRoundRoster(members){
+  net.teamMembers=members||net.teamMembers;
+  net.alive=new Set([...(net.teamMembers.red||[]),...(net.teamMembers.blue||[])]);
+  net.eliminated=new Set(); net.roundResolved=false;
+}
+function checkRoundElimination(){
+  if(net.role!=='host' || !net.matchStarted || net.roundResolved || state.matchEnded) return;
+  const red=(net.teamMembers.red||[]).filter(id=>net.alive.has(id));
+  const blue=(net.teamMembers.blue||[]).filter(id=>net.alive.has(id));
+  if(red.length===0 || blue.length===0){
+    net.roundResolved=true;
+    const winningTeam=red.length===0?'blue':'red';
+    net.roundWins[winningTeam]++;
+    netSend({type:'event',name:'round-result',winningTeam,roundWins:net.roundWins});
+    applyRoundResult(winningTeam,net.roundWins);
   }
+}
+function markEliminated(message){
+  const id=message.victimId||message.from;
+  if(!id || net.eliminated.has(id)) return;
+  net.eliminated.add(id); net.alive.delete(id);
+  if(id===net.clientId) state.spectatingId=message.killerId||null;
+  checkRoundElimination();
+}
+function applyRoundResult(winningTeam,wins){
+  net.roundWins={red:Number(wins?.red||0),blue:Number(wins?.blue||0)};
+  updateMatchScore();
+  if(net.roundWins[winningTeam]>=5){
+    showMatchResult(net.team===winningTeam,`${winningTeam.toUpperCase()} TEAM — 5 SETS WIN`);
+    return;
+  }
+  state.playerHP=100; state.spectatingId=null; state.lives=3; setOnlineSpawn();
+  document.querySelector('#player-health > div').style.width='100%';
+  resetRoundRoster(net.teamMembers); netSetStatus(`${winningTeam.toUpperCase()} TEAM がセット獲得 — 次のセット`);
+  setTimeout(startCountdown,900);
 }
 function markTeamSeen(){
   if(net.team==='red'||net.team==='blue') net.teamSeen[net.team]=true;
@@ -1390,21 +1421,21 @@ function sendLobbyState(){
 }
 function startOnlineMatch(){
   if(net.role!=='host' || net.connections.size===0) return;
-  net.matchStarted=true; markTeamSeen(); netSend({type:'match-start'}); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false);
+  net.matchStarted=true; buildTeamMembers(); markTeamSeen(); netSend({type:'match-start',members:net.teamMembers,roundWins:{red:0,blue:0}}); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false);
 }
 
 function closePeer(){
   net.connections.forEach(connection=>connection.close()); net.connections.clear();
   if(net.dc){net.dc.close(); net.dc=null;}
   if(peer){peer.destroy(); peer=null;}
-  net.connected=false; net.role=null; net.matchStarted=false; net.teamSeen={red:false,blue:false};
+  net.connected=false; net.role=null; net.matchStarted=false; net.teamSeen={red:false,blue:false}; net.teamMembers={red:[],blue:[]}; net.alive.clear(); net.eliminated.clear(); net.roundWins={red:0,blue:0};
 }
 function receiveNetMessage(message){
   if(!message || typeof message!=='object') return;
   if(message.type==='state') netRemoteState(message);
   else if(message.type==='match-config'){ net.team=message.assignedTeam||net.team; mapSelect.value=message.map; teamMode.value=message.mode; applyMap(message.map); netSetStatus(`ロビー参加 — ${net.team.toUpperCase()} TEAM`); }
   else if(message.type==='lobby') updateRoster(message.players);
-  else if(message.type==='match-start'){ net.matchStarted=true; markTeamSeen(); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false); }
+  else if(message.type==='match-start'){ net.matchStarted=true; net.roundWins=message.roundWins||{red:0,blue:0}; resetRoundRoster(message.members); markTeamSeen(); netSetStatus('ゲーム開始'); netPanel.classList.remove('show'); startGame(false); }
   else if(message.type==='hit' && message.target===net.clientId && message.team!==net.team) damagePlayer(message.damage||25,message.from);
   else if(message.type==='chat') addChatMessage(message.text,message.team);
   else if(message.type==='shot') remoteShot(message);
@@ -1424,7 +1455,7 @@ function attachConnection(connection){
   });
   connection.on('close',()=>{
     net.connections.delete(connection.peer); net.players=net.connections.size;
-    if(net.role==='host'){ sendLobbyState(); checkTeamDeparture(); }
+    if(net.role==='host'){ sendLobbyState(); }
     if(net.role!=='host' || net.connections.size===0){net.connected=false; netSetStatus('相手が退出しました');}
   });
   connection.on('error',()=>netSetStatus('P2P 接続エラー。もう一度お試しください。'));
@@ -1457,7 +1488,7 @@ function quickMatch(){
   if(cleanRoomCode(matchRoom.value)) joinMatch(); else createMatch();
 }
 function leaveMatch(){
-  if(net.connected && net.matchStarted) netSend({type:'event',name:'team-left',losingTeam:net.team,winningTeam:net.team==='red'?'blue':'red'});
+  if(net.connected && net.matchStarted) netSend({type:'event',name:'player-left',playerId:net.clientId,team:net.team});
   closePeer(); netSetStatus('退出しました'); matchRoomLabel.textContent='';
   remotePlayers.forEach(player=>scene.remove(player)); remotePlayers.clear();
 }
@@ -1493,25 +1524,24 @@ function refreshAllyESP(player){
 function netRemoteState(m){
   const playerId=m.from||'peer'; let r=remotePlayers.get(playerId); if(!r){r=new THREE.Group(); r.userData.team=m.team||'unknown'; const body=new THREE.Mesh(new THREE.BoxGeometry(.42,1.1,.3),new THREE.MeshStandardMaterial({color:m.team==='red'?0xd34848:0x3f8cff}));body.position.y=1; const head=new THREE.Mesh(new THREE.SphereGeometry(.2,10,8),new THREE.MeshStandardMaterial({color:0x77bbff}));head.position.y=1.7;body.userData.remotePlayer=true; head.userData.remotePlayer=true; body.userData.playerId=playerId; head.userData.playerId=playerId; r.add(body,head); refreshAllyESP(r); scene.add(r);remotePlayers.set(playerId,r);} else if(r.userData.team!==m.team){ r.userData.team=m.team||'unknown'; refreshAllyESP(r); }
   // A network state contains the camera eye height; the avatar root must remain on the ground.
-  r.position.lerp(new THREE.Vector3(m.x,0,m.z),.35); r.rotation.y=m.yaw;
+  r.position.lerp(new THREE.Vector3(m.x,0,m.z),.35); r.rotation.y=m.yaw; r.userData.yaw=m.yaw||0; r.userData.pitch=m.pitch||0;
 }
 function remoteShot(m){flashLight.intensity=2; flashSprite.material.opacity=.7;}
 function remoteEvent(m){
-  if(m.name==='team-left' && !state.matchEnded){
-    const won=m.winningTeam===net.team;
-    showMatchResult(won,`${m.losingTeam.toUpperCase()} TEAM 全員退出 — ${won?'勝利':'敗北'}`);
+  if(m.name==='eliminated'){
+    markEliminated(m);
+    if(m.killerId===net.clientId){ state.kills++; state.score+=100; }
+    document.getElementById('score-display').textContent=`SCORE ${state.score}`; updateMatchScore();
     return;
   }
-  if(m.name==='eliminated'){
-    if(m.killerId===net.clientId){
-      state.kills++; state.score+=100;
-      if(state.teamMode==='duel' && state.kills>=15) showMatchResult(true,'15 KILLS 達成');
-    } else if(state.teamMode==='duel' && m.killerId){
-      showMatchResult(false,'相手チームが15 KILLSを達成');
-    }
-    document.getElementById('score-display').textContent=`SCORE ${state.score}`; updateMatchScore();
+  if(m.name==='round-result'){
+    net.roundResolved=true; applyRoundResult(m.winningTeam,m.roundWins); return;
   }
-  if(m.name==='grenade'){} if(m.name==='bomb'){} if(m.name==='drone'){}
+  if(m.name==='player-left'){
+    // Leaving is not a kill/set result; retain the player for the current round.
+    return;
+  }
+  if(m.name==='grenade'||m.name==='bomb'||m.name==='drone') return;
 }
 
 function addChatMessage(text,team){ const line=document.createElement('div'); line.textContent=`[${team==='red'?'RED':'BLUE'}] ${String(text).slice(0,140)}`; line.style.color=team==='red'?'#ff9b9b':'#9bc7ff'; chatLog.appendChild(line); chatLog.scrollTop=chatLog.scrollHeight; }
@@ -1568,7 +1598,7 @@ document.getElementById('start-instructions').textContent = useTouchUI
 function updateMatchScore(){
   const el=document.getElementById('match-score');
   if(!state.onlineMatch){ el.textContent=''; return; }
-  el.textContent=`${net.team.toUpperCase()}  KILLS ${state.kills} / 15   HP ${Math.ceil(state.playerHP)}%`;
+  el.textContent=`SETS  RED ${net.roundWins.red||0} - ${net.roundWins.blue||0} BLUE   |   ${net.team.toUpperCase()}  KILLS ${state.kills} / 15   HP ${Math.ceil(state.playerHP)}%`;
 }
 function showMatchResult(win, detail){
   state.gameActive=false; state.matchEnded=true;
@@ -1588,7 +1618,7 @@ function startCountdown(){
 function startGame(botMode){
   state.teamMode = teamMode.value;
   applyMap(mapSelect.value);
-  state.onlineMatch=net.connected; state.botMode=botMode; state.matchEnded=false; state.kills=0; state.score=0; state.hits=0; state.shots=0; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
+  state.onlineMatch=net.connected; state.botMode=botMode; state.matchEnded=false; if(state.onlineMatch && net.role==='host' && !net.teamMembers.red.length) buildTeamMembers(); state.kills=0; state.score=0; state.hits=0; state.shots=0; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
   document.querySelector('#player-health > div').style.width='100%';
   document.getElementById('player-health').classList.toggle('show',botMode || state.onlineMatch);
   document.getElementById('bot-hud').classList.toggle('show',botMode || state.onlineMatch); chatPanel.classList.toggle('show',state.onlineMatch);
@@ -1903,11 +1933,8 @@ function damagePlayer(amount,killerId=null){
   const flash=document.getElementById('damage-flash'); flash.style.opacity='1'; setTimeout(()=>flash.style.opacity='0',90);
   if(state.playerHP===0){
     if(state.onlineMatch){
-      state.lives--; state.spectatingId=killerId; netSend({type:'event',name:'eliminated',killerId});
-      // Online matches never return to the main menu on death: spectate first, then respawn.
-      if(state.teamMode==='elimination' && state.lives<=0) state.lives=3;
-      netSetStatus(`撃破 — ${state.teamMode==='elimination'?'残機をリセット':'3秒後にリスポーン'}（キラー視点で観戦中）`);
-      setTimeout(respawnOnline,3000);
+      state.lives=0; state.spectatingId=killerId; const elimination={type:'event',name:'eliminated',killerId,victimId:net.clientId,victimTeam:net.team}; markEliminated(elimination); netSend(elimination);
+      netSetStatus('撃破 — 観戦中（チーム全滅でセット終了）');
     } else { showMatchResult(false,'撃破されました。'); }
   }
 }
@@ -2387,8 +2414,8 @@ function animate(){
   const dt = Math.min(0.05, (now-lastTime)/1000);
   lastTime = now;
 
-  if(net.connected && now-net.lastSend>50){ net.lastSend=now; netSend({type:'state',x:camera.position.x,y:camera.position.y,z:camera.position.z,yaw:state.viewYaw,pitch:state.viewPitch}); }
-  if(state.spectatingId){ const killer=remotePlayers.get(state.spectatingId); if(killer){ camera.position.lerp(killer.position.clone().add(new THREE.Vector3(0,1.7,1.6)),.12); camera.lookAt(killer.position.clone().add(new THREE.Vector3(0,1.35,0))); } }
+  if(net.connected && !state.spectatingId && now-net.lastSend>50){ net.lastSend=now; netSend({type:'state',x:camera.position.x,y:camera.position.y,z:camera.position.z,yaw:state.viewYaw,pitch:state.viewPitch}); }
+  if(state.spectatingId){ const opponent=remotePlayers.get(state.spectatingId); if(opponent){ camera.position.lerp(opponent.position.clone().add(new THREE.Vector3(0,1.7,0)),.35); state.viewYaw=opponent.userData.yaw||0; state.viewPitch=opponent.userData.pitch||0; state.recoilPitch=0; state.recoilYaw=0; } }
   if(state.gameActive && !state.spectatingId && !settingsPanel.classList.contains('show')){
     if(updateGamepad(dt)) { /* gamepad input handled above */ } else if(useTouchUI) updateMovementTouch(dt); else updateMovementPC(dt);
     tryFire(dt);
