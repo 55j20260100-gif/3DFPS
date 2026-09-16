@@ -292,6 +292,7 @@
         <select id="s-ads-mode"><option value="hold">長押し</option><option value="toggle">切替式</option></select>
       </div>
       <div class="row"><label>タッチ操作を強制</label><div class="toggle-sw" id="s-force-touch"><div class="knob"></div></div></div>
+      <div class="row"><label>PCモード（キーボード・マウス）</label><div class="toggle-sw" id="s-force-pc"><div class="knob"></div></div></div>
     </div>
 
     <div class="settings-section">
@@ -356,6 +357,7 @@ const DEFAULT_SETTINGS = {
   invertY: false,
   adsMode: 'hold',
   forceTouch: false,
+  forcePC: false,
   fov: 75,
   crosshairColor: '#33ff55',
   shadow: true,
@@ -377,7 +379,7 @@ function saveSettings(){
   try{ localStorage.setItem('shootingRangeSettings', JSON.stringify(settings)); }catch(e){}
 }
 
-const useTouchUI = isTouchCapable || settings.forceTouch;
+const useTouchUI = !settings.forcePC && (isTouchCapable || settings.forceTouch);
 
 document.documentElement.style.setProperty('--ch-color', settings.crosshairColor);
 
@@ -1230,6 +1232,26 @@ function castSegmentStrict(prevPos, newPos){
   return null;
 }
 
+function addMovingImpactMark(hit){
+  const object=hit.object;
+  if(!object || (!object.userData.botRef && !object.userData.remotePlayer)) return;
+  const normalWorld=(hit.face?.normal ? hit.face.normal.clone().transformDirection(object.matrixWorld).normalize() : new THREE.Vector3(0,0,1));
+  const mark=new THREE.Mesh(new THREE.CircleGeometry(object.userData.isHead?.045:.065,12),new THREE.MeshBasicMaterial({color:0x090909,transparent:true,opacity:.95,depthTest:true,depthWrite:false}));
+  const localPoint=object.worldToLocal(hit.point.clone());
+  const localNormal=normalWorld.clone().transformDirection(object.matrixWorld.clone().invert()).normalize();
+  mark.position.copy(localPoint).addScaledVector(localNormal,.008);
+  mark.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),localNormal);
+  mark.userData.bulletMark=true; mark.userData.markLife=0;
+  object.add(mark);
+  if(object.userData.bulletMarks){ object.userData.bulletMarks.push(mark); if(object.userData.bulletMarks.length>18){ object.remove(object.userData.bulletMarks.shift()); } } else object.userData.bulletMarks=[mark];
+}
+function updateMovingImpactMarks(dt){
+  scene.traverse(object=>{
+    const marks=object.userData?.bulletMarks; if(!marks) return;
+    for(let i=marks.length-1;i>=0;i--){ const mark=marks[i]; mark.userData.markLife=(mark.userData.markLife||0)+dt; if(mark.userData.markLife>18){ object.remove(mark); marks.splice(i,1); } }
+  });
+}
+
 function updateBullets(dt){
   for(let i=bullets.length-1;i>=0;i--){
     const b = bullets[i];
@@ -1247,8 +1269,8 @@ function updateBullets(dt){
     const hit = castSegmentStrict(b.prevPos, b.pos);
     if(hit){
       const bot = hit.object.userData.botRef;
-      if(bot) registerBotHit(bot, hit.point, hit.object.userData.isHead);
-      else if(hit.object.userData.remotePlayer){ const damage=hit.object.userData.isHead?100:30; netSend({type:'hit',damage,target:hit.object.userData.playerId}); state.hits++; state.score+=damage; updateAccuracy(); showHitMarker(); document.getElementById('score-display').textContent=`SCORE ${state.score}`; }
+      if(bot) { addMovingImpactMark(hit); registerBotHit(bot, hit.point, hit.object.userData.isHead); }
+      else if(hit.object.userData.remotePlayer){ addMovingImpactMark(hit); const damage=hit.object.userData.isHead?100:30; netSend({type:'hit',damage,target:hit.object.userData.playerId}); state.hits++; state.score+=damage; updateAccuracy(); showHitMarker(); document.getElementById('score-display').textContent=`SCORE ${state.score}`; }
       else if(hit.object===lane || hit.object===ground) { drawFloorHole(hit.point, hit.face?.normal); }
       else {
         const t = targets.find(tt => tt.mesh === hit.object);
@@ -1429,8 +1451,7 @@ function applyRoundResult(winningTeam,wins){
   // 数秒間は観戦状態を維持し、その後に体力を回復して次ラウンドを開始する。
   setTimeout(()=>{
     panel.classList.remove('show');
-    state.playerHP=100; state.lives=3; stopSpectating(); setOnlineSpawn();
-    document.querySelector('#player-health > div').style.width='100%';
+    respawnOnline();
     resetRoundRoster(net.teamMembers); netSetStatus('次ラウンド開始'); startCountdown();
   },2600);
 }
@@ -1975,9 +1996,16 @@ function setOnlineSpawn(){
   clampToRange();
 }
 function respawnOnline(){
-  if(!state.onlineMatch || !net.connected || !state.gameActive) return;
-  state.playerHP=100; state.spectatingId=null; setOnlineSpawn();
-  document.querySelector('#player-health > div').style.width='100%'; netSetStatus('P2P MATCH — リスポーン完了');
+  // Respawn must also work while the round countdown has paused gameplay.
+  if(!state.onlineMatch || !net.connected || state.matchEnded) return false;
+  state.playerHP=100; state.lives=3; stopSpectating();
+  state.mouseDown=false; state.ads=false; state.reloading=false; state.reload=null;
+  state.recoilPitch=0; state.recoilYaw=0; state.recoilTargetPitch=0; state.recoilTargetYaw=0;
+  setOnlineSpawn();
+  document.querySelector('#player-health > div').style.width='100%';
+  weaponRig.visible=true; armRig.visible=true;
+  netSetStatus('P2P MATCH — リスポーン完了');
+  return true;
 }
 function updateBots(dt){
   if(!state.botMode || !state.gameActive) return;
@@ -2351,6 +2379,7 @@ const sTouchSens = document.getElementById('s-touchsens');
 const sInvert = document.getElementById('s-invert');
 const sAdsMode = document.getElementById('s-ads-mode');
 const sForceTouch = document.getElementById('s-force-touch');
+const sForcePC = document.getElementById('s-force-pc');
 const sFov = document.getElementById('s-fov');
 const sChColor = document.getElementById('s-ch-color');
 const sShadow = document.getElementById('s-shadow');
@@ -2362,6 +2391,7 @@ function applySettingsToUI(){
   sInvert.classList.toggle('on', settings.invertY);
   sAdsMode.value = settings.adsMode;
   sForceTouch.classList.toggle('on', settings.forceTouch);
+  sForcePC.classList.toggle('on', settings.forcePC);
   sFov.value = settings.fov; document.getElementById('s-fov-val').textContent = settings.fov;
   sChColor.value = settings.crosshairColor;
   sShadow.classList.toggle('on', settings.shadow);
@@ -2392,6 +2422,12 @@ sAdsMode.addEventListener('change', ()=>{ settings.adsMode = sAdsMode.value; sav
 sForceTouch.addEventListener('click', ()=>{
   settings.forceTouch = !settings.forceTouch;
   sForceTouch.classList.toggle('on', settings.forceTouch);
+  saveSettings();
+  location.reload();
+});
+sForcePC.addEventListener('click',()=>{
+  settings.forcePC = !settings.forcePC;
+  sForcePC.classList.toggle('on', settings.forcePC);
   saveSettings();
   location.reload();
 });
@@ -2615,6 +2651,7 @@ function animate(){
   updateMatchScore();
 
   updateBullets(dt);
+  updateMovingImpactMarks(dt);
   updateCasings(dt);
   updateDroppedMags(dt);
 
