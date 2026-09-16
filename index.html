@@ -1388,11 +1388,29 @@ function checkRoundElimination(){
     applyRoundResult(winningTeam,net.roundWins);
   }
 }
+function findSpectatorTarget(preferredId=null){
+  if(preferredId && remotePlayers.has(preferredId)) return preferredId;
+  const enemyIds=(net.teamMembers[net.team==='red'?'blue':'red']||[]);
+  for(const id of enemyIds) if(remotePlayers.has(id) && net.alive.has(id)) return id;
+  for(const [id] of remotePlayers) if(net.alive.has(id)) return id;
+  for(const [id] of remotePlayers) return id;
+  return null;
+}
+function beginSpectating(preferredId=null){
+  state.spectatingId=findSpectatorTarget(preferredId);
+  state.mouseDown=false; state.ads=false; state.reloading=false;
+  weaponRig.visible=false; armRig.visible=false;
+  netSetStatus('撃破 — 相手視点を観戦中（セット終了まで）');
+}
+function stopSpectating(){
+  state.spectatingId=null; weaponRig.visible=true; armRig.visible=!state.ads;
+}
+
 function markEliminated(message){
   const id=message.victimId||message.from;
   if(!id || net.eliminated.has(id)) return;
   net.eliminated.add(id); net.alive.delete(id);
-  if(id===net.clientId) state.spectatingId=message.killerId||null;
+  if(id===net.clientId) beginSpectating(message.killerId||null);
   checkRoundElimination();
 }
 function applyRoundResult(winningTeam,wins){
@@ -1402,10 +1420,18 @@ function applyRoundResult(winningTeam,wins){
     showMatchResult(net.team===winningTeam,`${winningTeam.toUpperCase()} TEAM — 5 SETS WIN`);
     return;
   }
-  state.playerHP=100; state.spectatingId=null; state.lives=3; setOnlineSpawn();
-  document.querySelector('#player-health > div').style.width='100%';
-  resetRoundRoster(net.teamMembers); netSetStatus(`${winningTeam.toUpperCase()} TEAM がセット獲得 — 次のセット`);
-  setTimeout(startCountdown,900);
+  const panel=document.getElementById('match-result');
+  const title=panel.querySelector('.result-title');
+  title.textContent='SET COMPLETE'; title.className='result-title '+(net.team===winningTeam?'win':'lose');
+  panel.querySelector('.result-detail').textContent=`${winningTeam.toUpperCase()} TEAM がセット獲得 — 次ラウンドまで待機`;
+  panel.classList.add('show'); state.gameActive=false;
+  // 数秒間は観戦状態を維持し、その後に体力を回復して次ラウンドを開始する。
+  setTimeout(()=>{
+    panel.classList.remove('show');
+    state.playerHP=100; state.lives=3; stopSpectating(); setOnlineSpawn();
+    document.querySelector('#player-health > div').style.width='100%';
+    resetRoundRoster(net.teamMembers); netSetStatus('次ラウンド開始'); startCountdown();
+  },2600);
 }
 function markTeamSeen(){
   if(net.team==='red'||net.team==='blue') net.teamSeen[net.team]=true;
@@ -1933,8 +1959,7 @@ function damagePlayer(amount,killerId=null){
   const flash=document.getElementById('damage-flash'); flash.style.opacity='1'; setTimeout(()=>flash.style.opacity='0',90);
   if(state.playerHP===0){
     if(state.onlineMatch){
-      state.lives=0; state.spectatingId=killerId; const elimination={type:'event',name:'eliminated',killerId,victimId:net.clientId,victimTeam:net.team}; markEliminated(elimination); netSend(elimination);
-      netSetStatus('撃破 — 観戦中（チーム全滅でセット終了）');
+      state.lives=0; const elimination={type:'event',name:'eliminated',killerId,victimId:net.clientId,victimTeam:net.team}; markEliminated(elimination); netSend(elimination);
     } else { showMatchResult(false,'撃破されました。'); }
   }
 }
@@ -2415,7 +2440,19 @@ function animate(){
   lastTime = now;
 
   if(net.connected && !state.spectatingId && now-net.lastSend>50){ net.lastSend=now; netSend({type:'state',x:camera.position.x,y:camera.position.y,z:camera.position.z,yaw:state.viewYaw,pitch:state.viewPitch}); }
-  if(state.spectatingId){ const opponent=remotePlayers.get(state.spectatingId); if(opponent){ camera.position.lerp(opponent.position.clone().add(new THREE.Vector3(0,1.7,0)),.35); state.viewYaw=opponent.userData.yaw||0; state.viewPitch=opponent.userData.pitch||0; state.recoilPitch=0; state.recoilYaw=0; } }
+  if(state.spectatingId){
+    const opponent=remotePlayers.get(state.spectatingId);
+    if(opponent){
+      const yaw=opponent.userData.yaw||0, pitch=opponent.userData.pitch||0;
+      const forward=new THREE.Vector3(Math.sin(yaw),0,-Math.cos(yaw));
+      // Third-person spectator camera: the opponent's body is visible, own body/weapon is hidden.
+      const spectatorPos=opponent.position.clone().add(new THREE.Vector3(0,1.45,0)).addScaledVector(forward,-2.35);
+      camera.position.lerp(spectatorPos,.22);
+      const look=opponent.position.clone().add(new THREE.Vector3(0,1.25,0)).addScaledVector(forward,2.5);
+      camera.lookAt(look);
+      state.recoilPitch=0; state.recoilYaw=0; weaponRig.visible=false; armRig.visible=false;
+    } else beginSpectating();
+  }
   if(state.gameActive && !state.spectatingId && !settingsPanel.classList.contains('show')){
     if(updateGamepad(dt)) { /* gamepad input handled above */ } else if(useTouchUI) updateMovementTouch(dt); else updateMovementPC(dt);
     tryFire(dt);
