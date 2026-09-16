@@ -1295,7 +1295,7 @@ const state = window.state = {
   locked: false,
   gameActive: false,
   kick: {pos:0, rot:0}, weaponRecoilPitch: 0,
-  shakeTime: 0, botMode:false, onlineMatch:false, teamMode:'duel', playerHP:100, lives:3, kills:0, spectatingId:null, grenades:2, bombs:1, countdownTimer:null, matchEnded:false
+  shakeTime: 0, botMode:false, onlineMatch:false, teamMode:'duel', playerHP:100, lives:3, kills:0, spectating:false, spectatingId:null, grenades:2, bombs:1, countdownTimer:null, matchEnded:false
 };
 
 let currentFOV = settings.fov;
@@ -1397,13 +1397,14 @@ function findSpectatorTarget(preferredId=null){
   return null;
 }
 function beginSpectating(preferredId=null){
+  state.spectating=true;
   state.spectatingId=findSpectatorTarget(preferredId);
   state.mouseDown=false; state.ads=false; state.reloading=false;
   weaponRig.visible=false; armRig.visible=false;
   netSetStatus('撃破 — 相手視点を観戦中（セット終了まで）');
 }
 function stopSpectating(){
-  state.spectatingId=null; weaponRig.visible=true; armRig.visible=!state.ads;
+  state.spectating=false; state.spectatingId=null; weaponRig.visible=true; armRig.visible=!state.ads;
 }
 
 function markEliminated(message){
@@ -1644,7 +1645,7 @@ function startCountdown(){
 function startGame(botMode){
   state.teamMode = teamMode.value;
   applyMap(mapSelect.value);
-  state.onlineMatch=net.connected; state.botMode=botMode; state.matchEnded=false; if(state.onlineMatch && net.role==='host' && !net.teamMembers.red.length) buildTeamMembers(); state.kills=0; state.score=0; state.hits=0; state.shots=0; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
+  state.onlineMatch=net.connected; state.botMode=botMode; state.spectating=false; state.spectatingId=null; state.matchEnded=false; if(state.onlineMatch && net.role==='host' && !net.teamMembers.red.length) buildTeamMembers(); state.kills=0; state.score=0; state.hits=0; state.shots=0; if(state.onlineMatch) setOnlineSpawn(); state.playerHP=100; state.lives=3; state.reloading=false; state.reload=null; document.getElementById('reload-stage').classList.remove('show'); resetBots();
   document.querySelector('#player-health > div').style.width='100%';
   document.getElementById('player-health').classList.toggle('show',botMode || state.onlineMatch);
   document.getElementById('bot-hud').classList.toggle('show',botMode || state.onlineMatch); chatPanel.classList.toggle('show',state.onlineMatch);
@@ -2439,8 +2440,9 @@ function animate(){
   const dt = Math.min(0.05, (now-lastTime)/1000);
   lastTime = now;
 
-  if(net.connected && !state.spectatingId && now-net.lastSend>50){ net.lastSend=now; netSend({type:'state',x:camera.position.x,y:camera.position.y,z:camera.position.z,yaw:state.viewYaw,pitch:state.viewPitch}); }
-  if(state.spectatingId){
+  if(net.connected && !state.spectating && now-net.lastSend>50){ net.lastSend=now; netSend({type:'state',x:camera.position.x,y:camera.position.y,z:camera.position.z,yaw:state.viewYaw,pitch:state.viewPitch}); }
+  if(state.spectating){
+    if(!state.spectatingId) state.spectatingId=findSpectatorTarget();
     const opponent=remotePlayers.get(state.spectatingId);
     if(opponent){
       const yaw=opponent.userData.yaw||0, pitch=opponent.userData.pitch||0;
@@ -2453,7 +2455,7 @@ function animate(){
       state.recoilPitch=0; state.recoilYaw=0; weaponRig.visible=false; armRig.visible=false;
     } else beginSpectating();
   }
-  if(state.gameActive && !state.spectatingId && !settingsPanel.classList.contains('show')){
+  if(state.gameActive && !state.spectating && !settingsPanel.classList.contains('show')){
     if(updateGamepad(dt)) { /* gamepad input handled above */ } else if(useTouchUI) updateMovementTouch(dt); else updateMovementPC(dt);
     tryFire(dt);
     updateReload(dt);
@@ -2483,7 +2485,7 @@ function animate(){
   state.kick.rot *= Math.max(0, 1 - dt*7.0);
   state.shakeTime = Math.max(0, state.shakeTime - dt);
 
-  camera.rotation.y = state.viewYaw + state.recoilYaw;
+  if(!state.spectating) camera.rotation.y = state.viewYaw + state.recoilYaw;
   // 合計ピッチをクランプしたら viewPitch に書き戻す。
   // これで反動中もマウス操作にデッドゾーンが発生しない。
   const PITCH_LIMIT = Math.PI/2 - 0.05;
@@ -2495,7 +2497,7 @@ function animate(){
     pitch = -PITCH_LIMIT;
     state.viewPitch = pitch - state.recoilPitch;
   }
-  camera.rotation.x = pitch;
+  if(!state.spectating) camera.rotation.x = pitch;
 
   currentFOV += (targetFOV-currentFOV)*Math.min(1,dt*10);
   camera.fov = currentFOV;
@@ -2585,8 +2587,8 @@ function animate(){
   // カメラ反動は独立しているため、銃モデルを隠しても射撃反動は残る。
   const scopeAiming = state.ads && isScopeWeapon;
   weaponModels.forEach((m,i)=>{ m.visible = !scopeAiming && (i===state.weaponIdx); });
-  weaponRig.visible = !scopeAiming;
-  armRig.visible = !state.ads;
+  weaponRig.visible = !scopeAiming && !state.spectating;
+  armRig.visible = !state.ads && !state.spectating;
 
   flashLight.intensity *= 0.56;
   flashSprite.material.opacity *= 0.42;
